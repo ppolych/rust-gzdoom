@@ -35,3 +35,4 @@ The project is still pre-playable. Rendering is partial, visibility is approxima
 
 The workspace packages offline, but manifests still need `repository`, `homepage`, and `documentation` metadata.
 # rust-gzdoom
+# rust-gzdoom
