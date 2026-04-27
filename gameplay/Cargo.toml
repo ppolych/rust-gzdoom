@@ -1,0 +1,15 @@
+[package]
+name = "gameplay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Gameplay state and simulation for rust-gzdoom"
+
+[dependencies]
+anyhow.workspace = true
+level.workspace = true
+glam = "0.24"
+input.workspace = true
+fixed-point = { path = "../fixed-point" }
+hecs = "0.11.0"

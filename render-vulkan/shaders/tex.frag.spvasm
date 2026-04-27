@@ -1,0 +1,46 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Codex
+; Bound: 40
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %in_uv %in_color %out_color
+               OpExecutionMode %main OriginUpperLeft
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %in_uv "in_uv"
+               OpName %in_color "in_color"
+               OpName %out_color "out_color"
+               OpName %tex "tex"
+               OpDecorate %in_uv Location 0
+               OpDecorate %in_color Location 1
+               OpDecorate %out_color Location 0
+               OpDecorate %tex DescriptorSet 0
+               OpDecorate %tex Binding 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v2float = OpTypeVector %float 2
+    %v4float = OpTypeVector %float 4
+      %uint = OpTypeInt 32 0
+      %image = OpTypeImage %float 2D 0 0 0 1 Unknown
+    %sampled = OpTypeSampledImage %image
+%_ptr_UniformConstant_sampled = OpTypePointer UniformConstant %sampled
+%_ptr_Input_v2float = OpTypePointer Input %v2float
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+      %in_uv = OpVariable %_ptr_Input_v2float Input
+   %in_color = OpVariable %_ptr_Input_v4float Input
+  %out_color = OpVariable %_ptr_Output_v4float Output
+        %tex = OpVariable %_ptr_UniformConstant_sampled UniformConstant
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %20 = OpLoad %v2float %in_uv
+         %24 = OpLoad %v4float %in_color
+         %28 = OpLoad %sampled %tex
+         %32 = OpImageSampleImplicitLod %v4float %28 %20
+         %33 = OpFMul %v4float %32 %24
+               OpStore %out_color %33
+               OpReturn
+               OpFunctionEnd

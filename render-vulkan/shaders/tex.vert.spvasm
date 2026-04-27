@@ -1,0 +1,54 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Codex
+; Bound: 40
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in_pos %in_uv %in_color %out_uv %out_color %gl_Position
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %in_pos "in_pos"
+               OpName %in_uv "in_uv"
+               OpName %in_color "in_color"
+               OpName %out_uv "out_uv"
+               OpName %out_color "out_color"
+               OpName %gl_Position "gl_Position"
+               OpDecorate %in_pos Location 0
+               OpDecorate %in_uv Location 1
+               OpDecorate %in_color Location 2
+               OpDecorate %out_uv Location 0
+               OpDecorate %out_color Location 1
+               OpDecorate %gl_Position BuiltIn Position
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v2float = OpTypeVector %float 2
+    %v3float = OpTypeVector %float 3
+    %v4float = OpTypeVector %float 4
+    %float_1 = OpConstant %float 1
+%_ptr_Input_v3float = OpTypePointer Input %v3float
+%_ptr_Input_v2float = OpTypePointer Input %v2float
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%_ptr_Output_v2float = OpTypePointer Output %v2float
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+     %in_pos = OpVariable %_ptr_Input_v3float Input
+      %in_uv = OpVariable %_ptr_Input_v2float Input
+   %in_color = OpVariable %_ptr_Input_v4float Input
+     %out_uv = OpVariable %_ptr_Output_v2float Output
+  %out_color = OpVariable %_ptr_Output_v4float Output
+%gl_Position = OpVariable %_ptr_Output_v4float Output
+       %main = OpFunction %void None %3
+         %5 = OpLabel
+         %20 = OpLoad %v3float %in_pos
+         %24 = OpLoad %v2float %in_uv
+         %28 = OpLoad %v4float %in_color
+         %31 = OpCompositeExtract %float %20 0
+         %32 = OpCompositeExtract %float %20 1
+         %34 = OpCompositeExtract %float %20 2
+         %33 = OpCompositeConstruct %v4float %31 %32 %34 %float_1
+               OpStore %gl_Position %33
+               OpStore %out_uv %24
+               OpStore %out_color %28
+               OpReturn
+               OpFunctionEnd

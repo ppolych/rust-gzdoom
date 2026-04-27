@@ -1,0 +1,21 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Desktop application runner for rust-gzdoom"
+include = ["src/**", "Cargo.toml"]
+
+[dependencies]
+anyhow.workspace = true
+wad = { path = "../wad", version = "0.1.0" }
+level = { path = "../level", version = "0.1.0" }
+engine-core = { path = "../engine-core", version = "0.1.0" }
+gameplay = { path = "../gameplay", version = "0.1.0" }
+render-vulkan = { path = "../render-vulkan", version = "0.1.0" }
+clap = { version = "4.0", features = ["derive"] }
+winit = { version = "0.29", default-features = false, features = ["wayland", "rwh_05"] }
+raw-window-handle = "0.5"
+render-api = { path = "../render-api", version = "0.1.0" }
+glam = "0.24"

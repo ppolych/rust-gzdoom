@@ -1,0 +1,17 @@
+[workspace]
+members = ["engine-core", "wad", "config", "level", "gameplay", "input", "render-api", "render-vulkan", "app", "wayland-bootstrap", "fixed-point"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[workspace.dependencies]
+anyhow = "1.0"
+input = { path = "./input", version = "0.1.0" }
+level = { path = "./level", version = "0.1.0" }
+gameplay = { path = "./gameplay", version = "0.1.0" }
+render-api = { path = "./render-api", version = "0.1.0" }
+render-vulkan = { path = "./render-vulkan", version = "0.1.0" }

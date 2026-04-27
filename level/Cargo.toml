@@ -1,0 +1,13 @@
+[package]
+name = "level"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Level loading and BSP structures for rust-gzdoom"
+
+[dependencies]
+anyhow.workspace = true
+wad = { path = "../wad", version = "0.1.0" }
+glam = "0.24"
+byteorder = "1.5"

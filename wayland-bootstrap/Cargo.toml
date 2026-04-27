@@ -1,0 +1,15 @@
+[package]
+name = "wayland-bootstrap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Minimal Wayland/Vulkan bootstrap binary for rust-gzdoom"
+include = ["src/**", "Cargo.toml"]
+
+[dependencies]
+winit = { version = "0.29", default-features = false, features = ["wayland", "rwh_05"] }
+ash = "0.37"
+ash-window = "0.12"
+raw-window-handle = "0.5"
+anyhow = "1.0"

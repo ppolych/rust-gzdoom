@@ -1,0 +1,18 @@
+[package]
+name = "render-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Wayland/Vulkan renderer backend for rust-gzdoom"
+include = ["src/**", "shaders/*.spv", "shaders/*.spvasm", "Cargo.toml"]
+
+[dependencies]
+anyhow.workspace = true
+render-api.workspace = true
+glam = "0.24"
+ash = "0.37"
+ash-window = "0.12"
+raw-window-handle = "0.5"
+winit = { version = "0.29", default-features = false, features = ["wayland", "rwh_05"] }
+naga = { version = "0.14", features = ["glsl-in", "spv-out"] }

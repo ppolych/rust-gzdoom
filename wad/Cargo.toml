@@ -1,0 +1,12 @@
+[package]
+name = "wad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "WAD archive parsing for rust-gzdoom"
+include = ["src/**", "Cargo.toml"]
+
+[dependencies]
+anyhow.workspace = true
+byteorder = "1.5"
