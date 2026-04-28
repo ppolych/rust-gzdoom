@@ -1,54 +1,91 @@
 ; SPIR-V
 ; Version: 1.0
-; Generator: Codex
-; Bound: 40
+; Generator: Google Shaderc over Glslang; 11
+; Bound: 44
+; Schema: 0
                OpCapability Shader
           %1 = OpExtInstImport "GLSL.std.450"
                OpMemoryModel Logical GLSL450
-               OpEntryPoint Vertex %main "main" %in_pos %in_uv %in_color %out_uv %out_color %gl_Position
+               OpEntryPoint Vertex %main "main" %_ %in_pos %out_uv %in_uv %out_color %in_color %out_world_pos %in_world_pos %out_normal %in_normal
                OpSource GLSL 450
+               OpSourceExtension "GL_GOOGLE_cpp_style_line_directive"
+               OpSourceExtension "GL_GOOGLE_include_directive"
                OpName %main "main"
+               OpName %gl_PerVertex "gl_PerVertex"
+               OpMemberName %gl_PerVertex 0 "gl_Position"
+               OpMemberName %gl_PerVertex 1 "gl_PointSize"
+               OpMemberName %gl_PerVertex 2 "gl_ClipDistance"
+               OpMemberName %gl_PerVertex 3 "gl_CullDistance"
+               OpName %_ ""
                OpName %in_pos "in_pos"
-               OpName %in_uv "in_uv"
-               OpName %in_color "in_color"
                OpName %out_uv "out_uv"
+               OpName %in_uv "in_uv"
                OpName %out_color "out_color"
-               OpName %gl_Position "gl_Position"
+               OpName %in_color "in_color"
+               OpName %out_world_pos "out_world_pos"
+               OpName %in_world_pos "in_world_pos"
+               OpName %out_normal "out_normal"
+               OpName %in_normal "in_normal"
+               OpDecorate %gl_PerVertex Block
+               OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
+               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize
+               OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance
+               OpMemberDecorate %gl_PerVertex 3 BuiltIn CullDistance
                OpDecorate %in_pos Location 0
-               OpDecorate %in_uv Location 1
-               OpDecorate %in_color Location 2
                OpDecorate %out_uv Location 0
+               OpDecorate %in_uv Location 1
                OpDecorate %out_color Location 1
-               OpDecorate %gl_Position BuiltIn Position
+               OpDecorate %in_color Location 2
+               OpDecorate %out_world_pos Location 2
+               OpDecorate %in_world_pos Location 3
+               OpDecorate %out_normal Location 3
+               OpDecorate %in_normal Location 4
        %void = OpTypeVoid
           %3 = OpTypeFunction %void
       %float = OpTypeFloat 32
-    %v2float = OpTypeVector %float 2
-    %v3float = OpTypeVector %float 3
     %v4float = OpTypeVector %float 4
-    %float_1 = OpConstant %float 1
+       %uint = OpTypeInt 32 0
+     %uint_1 = OpConstant %uint 1
+%_arr_float_uint_1 = OpTypeArray %float %uint_1
+%gl_PerVertex = OpTypeStruct %v4float %float %_arr_float_uint_1 %_arr_float_uint_1
+%_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
+          %_ = OpVariable %_ptr_Output_gl_PerVertex Output
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+    %v3float = OpTypeVector %float 3
 %_ptr_Input_v3float = OpTypePointer Input %v3float
-%_ptr_Input_v2float = OpTypePointer Input %v2float
-%_ptr_Input_v4float = OpTypePointer Input %v4float
-%_ptr_Output_v2float = OpTypePointer Output %v2float
-%_ptr_Output_v4float = OpTypePointer Output %v4float
      %in_pos = OpVariable %_ptr_Input_v3float Input
-      %in_uv = OpVariable %_ptr_Input_v2float Input
-   %in_color = OpVariable %_ptr_Input_v4float Input
+    %float_1 = OpConstant %float 1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+    %v2float = OpTypeVector %float 2
+%_ptr_Output_v2float = OpTypePointer Output %v2float
      %out_uv = OpVariable %_ptr_Output_v2float Output
+%_ptr_Input_v2float = OpTypePointer Input %v2float
+      %in_uv = OpVariable %_ptr_Input_v2float Input
   %out_color = OpVariable %_ptr_Output_v4float Output
-%gl_Position = OpVariable %_ptr_Output_v4float Output
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+   %in_color = OpVariable %_ptr_Input_v4float Input
+%_ptr_Output_v3float = OpTypePointer Output %v3float
+%out_world_pos = OpVariable %_ptr_Output_v3float Output
+%in_world_pos = OpVariable %_ptr_Input_v3float Input
+ %out_normal = OpVariable %_ptr_Output_v3float Output
+  %in_normal = OpVariable %_ptr_Input_v3float Input
        %main = OpFunction %void None %3
-         %5 = OpLabel
-         %20 = OpLoad %v3float %in_pos
-         %24 = OpLoad %v2float %in_uv
-         %28 = OpLoad %v4float %in_color
-         %31 = OpCompositeExtract %float %20 0
-         %32 = OpCompositeExtract %float %20 1
-         %34 = OpCompositeExtract %float %20 2
-         %33 = OpCompositeConstruct %v4float %31 %32 %34 %float_1
-               OpStore %gl_Position %33
-               OpStore %out_uv %24
-               OpStore %out_color %28
+          %5 = OpLabel
+         %19 = OpLoad %v3float %in_pos
+         %21 = OpCompositeExtract %float %19 0
+         %22 = OpCompositeExtract %float %19 1
+         %23 = OpCompositeExtract %float %19 2
+         %24 = OpCompositeConstruct %v4float %21 %22 %23 %float_1
+         %26 = OpAccessChain %_ptr_Output_v4float %_ %int_0
+               OpStore %26 %24
+         %32 = OpLoad %v2float %in_uv
+               OpStore %out_uv %32
+         %36 = OpLoad %v4float %in_color
+               OpStore %out_color %36
+         %40 = OpLoad %v3float %in_world_pos
+               OpStore %out_world_pos %40
+         %43 = OpLoad %v3float %in_normal
+               OpStore %out_normal %43
                OpReturn
                OpFunctionEnd

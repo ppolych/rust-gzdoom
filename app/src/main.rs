@@ -1,14 +1,15 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use engine_core::game::Game;
 use engine_core::GameLoop;
 use glam::DVec2;
 use level::Level;
 use render_api::{
-    FlatTriangle, RenderScene, Renderer, Sprite, TextureImage, ViewState, WallQuad, WallSectionKind,
+    FlatTriangle, PointLight, RenderDebugMode, RenderScene, Renderer, Sprite, TextureImage,
+    ViewState, WallQuad, WallSectionKind, MAX_POINT_LIGHTS,
 };
 use render_vulkan::VulkanRenderer;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use wad::Archive;
 use winit::{
     event::{Event, KeyEvent, MouseButton, WindowEvent},
@@ -22,6 +23,9 @@ const SKY_FALLBACK_TEXTURE: &str = "__sky";
 const DEBUG_SOLID_FLATS: bool = false;
 const DEBUG_SCENE_STATS: bool = false;
 const SUBSECTOR_VERTEX_EPSILON: f64 = 0.01;
+const DYNAMIC_LIGHTING_ENABLED: bool = true;
+const AMBIENT_STRENGTH: f32 = 0.35;
+const SKY_TRANSFER_SPECIALS: &[u16] = &[271, 272];
 
 #[derive(Parser)]
 struct Args {
@@ -29,6 +33,31 @@ struct Args {
     wad_path: String,
     #[arg(short, long, default_value = "E1M1")]
     map: String,
+    #[arg(long, value_enum, default_value_t = RenderDebugModeArg::Lit)]
+    render_debug_mode: RenderDebugModeArg,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RenderDebugModeArg {
+    Lit,
+    Solid,
+    Normals,
+    Uv,
+    LightOnly,
+    TextureOnly,
+}
+
+impl From<RenderDebugModeArg> for RenderDebugMode {
+    fn from(value: RenderDebugModeArg) -> Self {
+        match value {
+            RenderDebugModeArg::Lit => Self::Lit,
+            RenderDebugModeArg::Solid => Self::Solid,
+            RenderDebugModeArg::Normals => Self::Normals,
+            RenderDebugModeArg::Uv => Self::Uv,
+            RenderDebugModeArg::LightOnly => Self::LightOnly,
+            RenderDebugModeArg::TextureOnly => Self::TextureOnly,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -53,6 +82,7 @@ fn main() -> Result<()> {
     let (textures, pnames) = archive.load_textures()?;
     println!("Loading {} textures...", textures.len());
     let mut available_sprites = HashSet::new();
+    let mut texture_sizes = HashMap::new();
 
     for tex in textures {
         let mut data = vec![0u8; tex.width as usize * tex.height as usize * 4];
@@ -91,6 +121,7 @@ fn main() -> Result<()> {
             data,
         };
         renderer.load_texture(&tex.name, &image)?;
+        texture_sizes.insert(tex.name.clone(), (tex.width as f32, tex.height as f32));
     }
 
     let mut sprite_lumps = archive.find_lumps_in_range("S_START", "S_END");
@@ -144,12 +175,16 @@ fn main() -> Result<()> {
             data: rgba_data,
         };
         renderer.load_texture(&name, &image)?;
+        texture_sizes.insert(name.clone(), (64.0, 64.0));
         available_flats.insert(name);
     }
     available_flats.insert("__missing".to_string());
     available_flats.insert(SKY_FALLBACK_TEXTURE.to_string());
+    texture_sizes.insert("__missing".to_string(), (16.0, 16.0));
+    texture_sizes.insert(SKY_FALLBACK_TEXTURE.to_string(), (64.0, 64.0));
 
     let level = level::load_level(&archive, &args.map)?;
+    let map_feature_stats = collect_map_feature_stats(&archive, &level);
     println!("Loaded level {}:", args.map);
     println!("  Vertices: {}", level.vertices.len());
     println!("  Sectors: {}", level.sectors.len());
@@ -160,6 +195,7 @@ fn main() -> Result<()> {
     println!("  Nodes: {}", level.nodes.len());
 
     let mut game = Game::new(level);
+    let render_debug_mode = RenderDebugMode::from(args.render_debug_mode);
     let (_, startup_stats) = build_render_scene_with_stats(
         &game.level,
         game.player.pos_to_dvec2(),
@@ -168,8 +204,10 @@ fn main() -> Result<()> {
         &game.actors,
         &available_sprites,
         &available_flats,
+        &texture_sizes,
+        render_debug_mode,
     );
-    print_scene_summary(&args.map, &game.level, &startup_stats);
+    print_scene_summary(&args.map, &game.level, &startup_stats, &map_feature_stats);
     let mut loop_ = GameLoop::new(35.0);
 
     event_loop.run(move |event, elwt| {
@@ -251,9 +289,11 @@ fn main() -> Result<()> {
                     &game.actors,
                     &available_sprites,
                     &available_flats,
+                    &texture_sizes,
+                    render_debug_mode,
                 );
                 if DEBUG_SCENE_STATS {
-                    print_scene_summary(&args.map, &game.level, &scene_stats);
+                    print_scene_summary(&args.map, &game.level, &scene_stats, &map_feature_stats);
                 }
 
                 if let Err(e) = renderer.render_scene(&scene, &view) {
@@ -337,15 +377,50 @@ struct SceneBuildStats {
     min_visible_subsector_segs: usize,
     max_visible_subsector_segs: usize,
     visible_subsectors_under_three_segs: usize,
-    reconstructed_subsector_loops: usize,
-    failed_subsector_loops: usize,
-    reversed_subsector_segs: usize,
+    bsp_clipped_polygons_generated: usize,
+    degenerate_polygons_skipped: usize,
     wall_triangles: usize,
     floor_triangles: usize,
     ceiling_triangles: usize,
     skipped_subsectors: usize,
     skipped_degenerate_triangles: usize,
     missing_flat_fallbacks: usize,
+    wall_texture_size_fallbacks: usize,
+    flat_texture_size_fallbacks: usize,
+    dynamic_lighting_enabled: bool,
+    ambient_strength: f32,
+    point_lights: usize,
+    render_debug_mode: RenderDebugMode,
+}
+
+#[derive(Default)]
+struct MapFeatureStats {
+    has_animated_lump: bool,
+    has_switches_lump: bool,
+    has_textmap_lump: bool,
+    has_behavior_lump: bool,
+    has_znodes_lump: bool,
+    has_gl_nodes: bool,
+    sky_transfer_lines: usize,
+}
+
+fn collect_map_feature_stats(archive: &Archive, level: &Level) -> MapFeatureStats {
+    MapFeatureStats {
+        has_animated_lump: archive.find_lump_index("ANIMATED").is_some(),
+        has_switches_lump: archive.find_lump_index("SWITCHES").is_some(),
+        has_textmap_lump: archive.find_lump_index("TEXTMAP").is_some(),
+        has_behavior_lump: archive.find_lump_index("BEHAVIOR").is_some(),
+        has_znodes_lump: archive.find_lump_index("ZNODES").is_some(),
+        has_gl_nodes: archive.find_lump_index("GL_VERT").is_some()
+            || archive.find_lump_index("GL_SEGS").is_some()
+            || archive.find_lump_index("GL_SSECT").is_some()
+            || archive.find_lump_index("GL_NODES").is_some(),
+        sky_transfer_lines: level
+            .linedefs
+            .iter()
+            .filter(|line| SKY_TRANSFER_SPECIALS.contains(&line.special))
+            .count(),
+    }
 }
 
 fn build_render_scene_with_stats(
@@ -356,19 +431,36 @@ fn build_render_scene_with_stats(
     actors: &[gameplay::Actor],
     available_sprites: &HashSet<String>,
     available_flats: &HashSet<String>,
+    texture_sizes: &HashMap<String, (f32, f32)>,
+    render_debug_mode: RenderDebugMode,
 ) -> (RenderScene, SceneBuildStats) {
     let mut scene = RenderScene::default();
     let mut stats = SceneBuildStats::default();
+    scene.dynamic_lighting_enabled = DYNAMIC_LIGHTING_ENABLED;
+    scene.ambient_strength = AMBIENT_STRENGTH;
+    scene.debug_mode = render_debug_mode;
     let visibility = build_visibility(level, viewer_pos, viewer_angle, eye_height);
     stats.total_subsectors = level.subsectors.len();
     stats.visible_subsectors = visibility.visible_subsectors.len();
     stats.visible_segs = visibility.visible_segs.len();
+    let bsp_polygons = build_bsp_subsector_polygons(level);
+    stats.bsp_clipped_polygons_generated = bsp_polygons
+        .polygons
+        .iter()
+        .filter(|poly| poly.is_some())
+        .count();
+    stats.degenerate_polygons_skipped = bsp_polygons.degenerate_polygons_skipped;
     let viewer_floor = level
         .find_sector(viewer_pos)
         .and_then(|idx| level.sectors.get(idx))
         .map(|sector| sector.floor_height)
         .unwrap_or(0.0);
     let viewer_eye_z = viewer_floor + eye_height;
+    scene.point_lights = generate_demo_lights(level, viewer_pos, viewer_angle, viewer_eye_z);
+    stats.dynamic_lighting_enabled = scene.dynamic_lighting_enabled;
+    stats.ambient_strength = scene.ambient_strength;
+    stats.point_lights = scene.point_lights.len();
+    stats.render_debug_mode = scene.debug_mode;
 
     for &subsector_index in &visibility.visible_subsectors {
         let subsector = &level.subsectors[subsector_index];
@@ -388,25 +480,13 @@ fn build_render_scene_with_stats(
                 subsector_index, subsector.first_seg, subsector.num_segs
             );
         }
-        let polygon = match reconstruct_subsector_polygon(level, subsector_index) {
-            Ok(loop_) => {
-                stats.reconstructed_subsector_loops += 1;
-                stats.reversed_subsector_segs += loop_.reversed_segs;
-                loop_.vertices
-            }
-            Err(reason) => {
-                eprintln!(
-                    "Skipping subsector {} (first_seg={} seg_count={}): {}",
-                    subsector_index, subsector.first_seg, subsector.num_segs, reason
-                );
-                stats.skipped_subsectors += 1;
-                stats.failed_subsector_loops += 1;
-                continue;
-            }
+        let Some(Some(polygon)) = bsp_polygons.polygons.get(subsector_index) else {
+            stats.skipped_subsectors += 1;
+            continue;
         };
 
         let light = light_color(sector.light_level);
-        let (triangles, skipped) = triangulate_convex_fan_with_stats(&polygon);
+        let (triangles, skipped) = triangulate_convex_fan_with_stats(polygon);
         stats.skipped_degenerate_triangles += skipped;
         for [a, b, c] in triangles {
             let floor_texture =
@@ -445,7 +525,15 @@ fn build_render_scene_with_stats(
         let start = level.vertices[seg.v1].p;
         let end = level.vertices[seg.v2].p;
         let before = scene.walls.len();
-        build_wall_sections_for_seg(level, linedef, seg, start, end, &mut scene.walls);
+        build_wall_sections_for_seg(
+            level,
+            linedef,
+            seg,
+            start,
+            end,
+            texture_sizes,
+            &mut scene.walls,
+        );
         stats.wall_triangles += (scene.walls.len() - before) * 2;
     }
 
@@ -496,40 +584,186 @@ fn build_render_scene_with_stats(
         }
     }
 
+    stats.wall_texture_size_fallbacks = scene
+        .walls
+        .iter()
+        .filter(|wall| !texture_sizes.contains_key(&wall.texture_name))
+        .count();
+    stats.flat_texture_size_fallbacks = scene
+        .flats
+        .iter()
+        .filter(|flat| !texture_sizes.contains_key(&flat.texture_name))
+        .count();
+
     (scene, stats)
 }
 
-fn print_scene_summary(map_name: &str, level: &Level, stats: &SceneBuildStats) {
+fn print_scene_summary(
+    map_name: &str,
+    level: &Level,
+    stats: &SceneBuildStats,
+    map_features: &MapFeatureStats,
+) {
     println!("Render scene summary for {}:", map_name);
     println!("  Sectors: {}", level.sectors.len());
     println!("  Subsectors: {}", stats.total_subsectors);
     println!("  Visible subsectors: {}", stats.visible_subsectors);
     println!(
-        "  Reconstructed subsector loops: {}",
-        stats.reconstructed_subsector_loops
-    );
-    println!("  Failed subsector loops: {}", stats.failed_subsector_loops);
-    println!(
-        "  Reversed subsector segs: {}",
-        stats.reversed_subsector_segs
+        "  BSP clipped polygons generated: {}",
+        stats.bsp_clipped_polygons_generated
     );
     println!("  Visible segs: {}", stats.visible_segs);
     println!("  Flat segs used: {}", stats.flat_seg_count);
+    let average_edges = if stats.visible_subsectors == 0 {
+        0.0
+    } else {
+        stats.flat_seg_count as f64 / stats.visible_subsectors as f64
+    };
     println!(
-        "  Visible subsector seg count: min={} max={} under3={}",
+        "  Visible subsector seg count: min={} max={} under3={} avg={:.2}",
         stats.min_visible_subsector_segs,
         stats.max_visible_subsector_segs,
-        stats.visible_subsectors_under_three_segs
+        stats.visible_subsectors_under_three_segs,
+        average_edges
     );
     println!("  Wall triangles: {}", stats.wall_triangles);
     println!("  Floor triangles: {}", stats.floor_triangles);
     println!("  Ceiling triangles: {}", stats.ceiling_triangles);
     println!("  Skipped subsectors: {}", stats.skipped_subsectors);
     println!(
+        "  Degenerate BSP polygons skipped: {}",
+        stats.degenerate_polygons_skipped
+    );
+    println!(
         "  Skipped degenerate flat triangles: {}",
         stats.skipped_degenerate_triangles
     );
     println!("  Missing flat fallbacks: {}", stats.missing_flat_fallbacks);
+    println!("Texture UVs:");
+    println!("  Flat UV mode: UZDoom-style world x/64, -z/64");
+    println!("  Wall UV mode: seg distance with simplified texture_top");
+    println!("  Sidedef offsets applied: yes");
+    println!("  Texture size fallback: 64x64");
+    println!(
+        "  Wall texture size fallbacks: {}",
+        stats.wall_texture_size_fallbacks
+    );
+    println!(
+        "  Flat texture size fallbacks: {}",
+        stats.flat_texture_size_fallbacks
+    );
+    println!("Texture compatibility:");
+    println!("  Exact wall pegging: TODO");
+    println!("  Wrapped middle textures: sampler repeat");
+    println!("  Texture scaling metadata: not present in parsed map format");
+    println!("  Slopes/skew metadata: not present in parsed map format");
+    println!(
+        "  Sky transfer linedefs detected: {}",
+        map_features.sky_transfer_lines
+    );
+    println!(
+        "  ANIMATED lump: {}",
+        present_text(map_features.has_animated_lump)
+    );
+    println!(
+        "  SWITCHES lump: {}",
+        present_text(map_features.has_switches_lump)
+    );
+    println!(
+        "  UDMF TEXTMAP lump: {}",
+        present_text(map_features.has_textmap_lump)
+    );
+    println!(
+        "  BEHAVIOR lump: {}",
+        present_text(map_features.has_behavior_lump)
+    );
+    println!(
+        "  ZNODES/GL nodes: {}",
+        present_text(map_features.has_znodes_lump || map_features.has_gl_nodes)
+    );
+    println!("Renderer lighting:");
+    println!("  Render debug mode: {:?}", stats.render_debug_mode);
+    println!(
+        "  Dynamic lighting: {}",
+        if stats.dynamic_lighting_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!("  Point lights: {}", stats.point_lights);
+    println!("  Ambient: {:.2}", stats.ambient_strength);
+    println!("  Max lights: {}", MAX_POINT_LIGHTS);
+}
+
+fn present_text(present: bool) -> &'static str {
+    if present {
+        "present (not applied yet)"
+    } else {
+        "absent"
+    }
+}
+
+fn generate_demo_lights(
+    level: &Level,
+    viewer_pos: DVec2,
+    viewer_angle: f64,
+    viewer_eye_z: f64,
+) -> Vec<PointLight> {
+    if !DYNAMIC_LIGHTING_ENABLED {
+        return Vec::new();
+    }
+
+    let forward = DVec2::new(viewer_angle.cos(), viewer_angle.sin());
+    let right = DVec2::new(-viewer_angle.sin(), viewer_angle.cos());
+    let sample_height = |pos: DVec2, fallback_z: f64| {
+        level
+            .find_sector(pos)
+            .and_then(|idx| level.sectors.get(idx))
+            .map(|sector| sector.floor_height + 80.0)
+            .unwrap_or(fallback_z)
+    };
+
+    let mut lights = Vec::new();
+    let mut push_light = |map_pos: DVec2, z: f64, color: [f32; 3], intensity: f32, radius: f32| {
+        if lights.len() >= MAX_POINT_LIGHTS {
+            return;
+        }
+        lights.push(PointLight {
+            position: [map_pos.x as f32, z as f32, map_pos.y as f32],
+            color,
+            intensity,
+            radius,
+        });
+    };
+
+    push_light(
+        viewer_pos + forward * 96.0,
+        viewer_eye_z + 32.0,
+        [1.0, 0.72, 0.45],
+        1.25,
+        520.0,
+    );
+
+    let cool_pos = viewer_pos + forward * 420.0;
+    push_light(
+        cool_pos,
+        sample_height(cool_pos, viewer_eye_z + 32.0),
+        [0.45, 0.62, 1.0],
+        0.85,
+        420.0,
+    );
+
+    let green_pos = viewer_pos + right * 320.0 + forward * 220.0;
+    push_light(
+        green_pos,
+        sample_height(green_pos, viewer_eye_z + 24.0),
+        [0.35, 1.0, 0.45],
+        0.7,
+        360.0,
+    );
+
+    lights
 }
 
 struct VisibilitySet {
@@ -724,46 +958,6 @@ fn bbox_in_view(bbox: [i16; 4], viewer_pos: DVec2, clipper: &AngleClipper) -> bo
     clipper.intersects_fov(interval) && !clipper.is_fully_occluded(interval)
 }
 
-#[cfg(test)]
-fn subsector_polygon_from_seg_loop(
-    level: &Level,
-    subsector: &level::SubSector,
-) -> Option<Vec<DVec2>> {
-    let index = level
-        .subsectors
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, subsector))?;
-    reconstruct_subsector_polygon(level, index)
-        .ok()
-        .map(|loop_| loop_.vertices)
-}
-
-struct SubsectorPolygonLoop {
-    vertices: Vec<DVec2>,
-    reversed_segs: usize,
-}
-
-fn reconstruct_subsector_polygon(
-    level: &Level,
-    subsector_index: usize,
-) -> Result<SubsectorPolygonLoop, String> {
-    let subsector = level
-        .subsectors
-        .get(subsector_index)
-        .ok_or_else(|| format!("subsector index {} is out of range", subsector_index))?;
-    let seg_indices = subsector_seg_indices(level, subsector).ok_or_else(|| {
-        format!(
-            "seg range {}..{} exceeds seg count {}",
-            subsector.first_seg,
-            subsector
-                .first_seg
-                .saturating_add(subsector.num_segs as usize),
-            level.segs.len()
-        )
-    })?;
-    chain_subsector_seg_vertices(level, subsector, &seg_indices)
-}
-
 fn subsector_seg_indices(level: &Level, subsector: &level::SubSector) -> Option<Vec<usize>> {
     let first_seg = subsector.first_seg;
     let last_seg = first_seg.checked_add(subsector.num_segs as usize)?;
@@ -773,123 +967,221 @@ fn subsector_seg_indices(level: &Level, subsector: &level::SubSector) -> Option<
     Some((first_seg..last_seg).collect())
 }
 
-fn chain_subsector_seg_vertices(
-    level: &Level,
-    subsector: &level::SubSector,
-    seg_indices: &[usize],
-) -> Result<SubsectorPolygonLoop, String> {
-    if subsector.num_segs < 3 {
-        return Err(format!("needs at least 3 segs, has {}", subsector.num_segs));
-    }
+struct BspSubsectorPolygons {
+    polygons: Vec<Option<Vec<DVec2>>>,
+    degenerate_polygons_skipped: usize,
+}
 
-    if seg_indices.is_empty()
-        || seg_indices.len() != subsector.num_segs as usize
-        || seg_indices.iter().any(|&idx| idx >= level.segs.len())
-    {
-        return Err(format!(
-            "seg range {}..{} exceeds seg count {}",
-            subsector.first_seg,
-            subsector.first_seg + subsector.num_segs as usize,
-            level.segs.len()
-        ));
-    }
-
-    for &seg_index in seg_indices {
-        let seg = &level.segs[seg_index];
-        if !valid_seg_vertices(level, seg) {
-            return Err(format!(
-                "seg {} has invalid vertices {} -> {}",
-                seg_index, seg.v1, seg.v2
-            ));
-        }
-    }
-
-    let first_seg = &level.segs[seg_indices[0]];
-    let first_vertex = level.vertices[first_seg.v1].p;
-    let mut next_vertex = level.vertices[first_seg.v2].p;
-    let mut used = vec![false; seg_indices.len()];
-    used[0] = true;
-    let mut vertices = Vec::with_capacity(seg_indices.len());
-    vertices.push(first_vertex);
-    let mut reversed_segs = 0;
-
-    while used.iter().any(|used| !*used) {
-        if points_nearly_equal(next_vertex, first_vertex) {
-            return Err("loop closed before all segs were used".to_string());
-        }
-
-        if vertices
-            .last()
-            .is_some_and(|previous| points_nearly_equal(*previous, next_vertex))
-        {
-            return Err(format!(
-                "duplicate consecutive vertex near ({:.3}, {:.3})",
-                next_vertex.x, next_vertex.y
-            ));
-        }
-        vertices.push(next_vertex);
-        let Some((candidate_idx, reversed)) =
-            find_next_subsector_seg(level, seg_indices, &used, next_vertex)
-        else {
-            return Err(format!(
-                "no unused seg connects near ({:.3}, {:.3})",
-                next_vertex.x, next_vertex.y
-            ));
+fn build_bsp_subsector_polygons(level: &Level) -> BspSubsectorPolygons {
+    let mut polygons = vec![None; level.subsectors.len()];
+    let mut degenerate_polygons_skipped = 0;
+    let Some(initial_polygon) = initial_bsp_clip_polygon(level) else {
+        return BspSubsectorPolygons {
+            polygons,
+            degenerate_polygons_skipped,
         };
+    };
 
-        used[candidate_idx] = true;
-        let seg = &level.segs[seg_indices[candidate_idx]];
-        if reversed {
-            reversed_segs += 1;
-            next_vertex = level.vertices[seg.v1].p;
-        } else {
-            next_vertex = level.vertices[seg.v2].p;
+    if level.nodes.is_empty() {
+        if !level.subsectors.is_empty() && !is_degenerate_polygon(&initial_polygon) {
+            polygons[0] = Some(initial_polygon);
         }
+        return BspSubsectorPolygons {
+            polygons,
+            degenerate_polygons_skipped,
+        };
     }
 
-    if !points_nearly_equal(next_vertex, first_vertex) {
-        return Err(format!(
-            "loop ended near ({:.3}, {:.3}) instead of first vertex ({:.3}, {:.3})",
-            next_vertex.x, next_vertex.y, first_vertex.x, first_vertex.y
-        ));
+    clip_bsp_node_to_subsectors(
+        level,
+        level.nodes.len() - 1,
+        initial_polygon,
+        &mut polygons,
+        &mut degenerate_polygons_skipped,
+    );
+    BspSubsectorPolygons {
+        polygons,
+        degenerate_polygons_skipped,
     }
-    if vertices.len() < 3 {
-        return Err("loop produced fewer than 3 vertices".to_string());
-    }
-
-    Ok(SubsectorPolygonLoop {
-        vertices,
-        reversed_segs,
-    })
 }
 
-fn find_next_subsector_seg(
+fn initial_bsp_clip_polygon(level: &Level) -> Option<Vec<DVec2>> {
+    let first = level.vertices.first()?.p;
+    let mut min_x = first.x;
+    let mut max_x = first.x;
+    let mut min_y = first.y;
+    let mut max_y = first.y;
+    for vertex in &level.vertices {
+        min_x = min_x.min(vertex.p.x);
+        max_x = max_x.max(vertex.p.x);
+        min_y = min_y.min(vertex.p.y);
+        max_y = max_y.max(vertex.p.y);
+    }
+
+    let width = (max_x - min_x).abs();
+    let height = (max_y - min_y).abs();
+    let pad = width.max(height).max(1024.0) * 0.25 + 64.0;
+    Some(vec![
+        DVec2::new(min_x - pad, min_y - pad),
+        DVec2::new(max_x + pad, min_y - pad),
+        DVec2::new(max_x + pad, max_y + pad),
+        DVec2::new(min_x - pad, max_y + pad),
+    ])
+}
+
+fn clip_bsp_node_to_subsectors(
     level: &Level,
-    seg_indices: &[usize],
-    used: &[bool],
-    next_vertex: DVec2,
-) -> Option<(usize, bool)> {
-    for (i, &seg_index) in seg_indices.iter().enumerate() {
-        let seg = &level.segs[seg_index];
-        if !used[i] && points_nearly_equal(level.vertices[seg.v1].p, next_vertex) {
-            return Some((i, false));
-        }
+    node_index: usize,
+    polygon: Vec<DVec2>,
+    out: &mut [Option<Vec<DVec2>>],
+    degenerate_polygons_skipped: &mut usize,
+) {
+    if polygon.len() < 3 || is_degenerate_polygon(&polygon) {
+        *degenerate_polygons_skipped += 1;
+        return;
     }
-    for (i, &seg_index) in seg_indices.iter().enumerate() {
-        let seg = &level.segs[seg_index];
-        if !used[i] && points_nearly_equal(level.vertices[seg.v2].p, next_vertex) {
-            return Some((i, true));
-        }
-    }
-    None
+
+    let node = &level.nodes[node_index];
+    let front = clip_polygon_to_bsp_side(&polygon, node, 0);
+    let back = clip_polygon_to_bsp_side(&polygon, node, 1);
+    assign_bsp_child_polygon(
+        level,
+        node.children[0],
+        front,
+        out,
+        degenerate_polygons_skipped,
+    );
+    assign_bsp_child_polygon(
+        level,
+        node.children[1],
+        back,
+        out,
+        degenerate_polygons_skipped,
+    );
 }
 
-fn valid_seg_vertices(level: &Level, seg: &level::Seg) -> bool {
-    seg.v1 != seg.v2 && seg.v1 < level.vertices.len() && seg.v2 < level.vertices.len()
+fn assign_bsp_child_polygon(
+    level: &Level,
+    child: u16,
+    polygon: Vec<DVec2>,
+    out: &mut [Option<Vec<DVec2>>],
+    degenerate_polygons_skipped: &mut usize,
+) {
+    if polygon.len() < 3 || is_degenerate_polygon(&polygon) {
+        *degenerate_polygons_skipped += 1;
+        return;
+    }
+
+    if (child & 0x8000) != 0 {
+        let subsector_index = (child & 0x7fff) as usize;
+        if let Some(slot) = out.get_mut(subsector_index) {
+            *slot = Some(polygon);
+        }
+    } else {
+        clip_bsp_node_to_subsectors(
+            level,
+            child as usize,
+            polygon,
+            out,
+            degenerate_polygons_skipped,
+        );
+    }
 }
 
-fn points_nearly_equal(a: DVec2, b: DVec2) -> bool {
-    a.distance(b) < SUBSECTOR_VERTEX_EPSILON
+fn clip_polygon_to_bsp_side(polygon: &[DVec2], node: &level::Node, side: usize) -> Vec<DVec2> {
+    if polygon.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clipped = Vec::new();
+    for i in 0..polygon.len() {
+        let current = polygon[i];
+        let next = polygon[(i + 1) % polygon.len()];
+        let current_distance = bsp_line_signed_distance(node, current);
+        let next_distance = bsp_line_signed_distance(node, next);
+        let current_inside = bsp_side_contains_distance(side, current_distance);
+        let next_inside = bsp_side_contains_distance(side, next_distance);
+
+        match (current_inside, next_inside) {
+            (true, true) => push_unique_polygon_vertex(&mut clipped, next),
+            (true, false) => {
+                push_unique_polygon_vertex(
+                    &mut clipped,
+                    line_segment_bsp_intersection(current, next, current_distance, next_distance),
+                );
+            }
+            (false, true) => {
+                push_unique_polygon_vertex(
+                    &mut clipped,
+                    line_segment_bsp_intersection(current, next, current_distance, next_distance),
+                );
+                push_unique_polygon_vertex(&mut clipped, next);
+            }
+            (false, false) => {}
+        }
+    }
+    remove_closing_duplicate(&mut clipped);
+    clipped
+}
+
+fn bsp_line_signed_distance(node: &level::Node, point: DVec2) -> f64 {
+    let origin = DVec2::new(node.x as f64, node.y as f64);
+    let direction = DVec2::new(node.dx as f64, node.dy as f64);
+    let rel = point - origin;
+    direction.x * rel.y - direction.y * rel.x
+}
+
+fn bsp_side_contains_distance(side: usize, distance: f64) -> bool {
+    if side == 0 {
+        distance <= SUBSECTOR_VERTEX_EPSILON
+    } else {
+        distance >= -SUBSECTOR_VERTEX_EPSILON
+    }
+}
+
+fn line_segment_bsp_intersection(a: DVec2, b: DVec2, da: f64, db: f64) -> DVec2 {
+    let denom = da - db;
+    if denom.abs() < f64::EPSILON {
+        return a;
+    }
+    let t = (da / denom).clamp(0.0, 1.0);
+    a + (b - a) * t
+}
+
+fn push_unique_polygon_vertex(polygon: &mut Vec<DVec2>, vertex: DVec2) {
+    if polygon
+        .last()
+        .is_some_and(|last| last.distance(vertex) < SUBSECTOR_VERTEX_EPSILON)
+    {
+        return;
+    }
+    polygon.push(vertex);
+}
+
+fn remove_closing_duplicate(polygon: &mut Vec<DVec2>) {
+    if polygon.len() >= 2
+        && polygon[0].distance(*polygon.last().expect("polygon has at least two vertices"))
+            < SUBSECTOR_VERTEX_EPSILON
+    {
+        polygon.pop();
+    }
+}
+
+fn is_degenerate_polygon(polygon: &[DVec2]) -> bool {
+    if polygon.len() < 3 {
+        return true;
+    }
+    polygon_signed_area(polygon).abs() < 0.001
+}
+
+fn polygon_signed_area(polygon: &[DVec2]) -> f64 {
+    let mut area = 0.0;
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % polygon.len()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    area * 0.5
 }
 
 fn triangulate_convex_fan_with_stats(polygon: &[DVec2]) -> (Vec<[DVec2; 3]>, usize) {
@@ -924,6 +1216,7 @@ fn build_wall_sections_for_seg(
     seg: &level::Seg,
     start: DVec2,
     end: DVec2,
+    texture_sizes: &HashMap<String, (f32, f32)>,
     walls: &mut Vec<WallQuad>,
 ) {
     let side_index = seg.side as usize;
@@ -936,7 +1229,20 @@ fn build_wall_sections_for_seg(
     };
     let front_sector = &level.sectors[front_sector_idx];
     let back_sector = linedef.sectors[1 - side_index].map(|idx| &level.sectors[idx]);
-    let line_len = (end - start).length() as f32;
+    let Some(linedef_start) = level.vertices.get(linedef.v1).map(|vertex| vertex.p) else {
+        return;
+    };
+    let Some(linedef_end) = level.vertices.get(linedef.v2).map(|vertex| vertex.p) else {
+        return;
+    };
+    let linedef_delta = linedef_end - linedef_start;
+    let linedef_len = linedef_delta.length();
+    if linedef_len <= f64::EPSILON {
+        return;
+    }
+    let line_dir = linedef_delta / linedef_len;
+    let dist_start = (start - linedef_start).dot(line_dir) as f32;
+    let dist_end = (end - linedef_start).dot(line_dir) as f32;
     let color = light_color(front_sector.light_level);
 
     if let Some(back_sector) = back_sector {
@@ -951,15 +1257,15 @@ fn build_wall_sections_for_seg(
                 back_sector.ceiling_height as f32,
                 front_sector.ceiling_height as f32,
                 compute_wall_uvs(
-                    linedef.flags,
-                    WallSectionKind::Upper,
-                    seg.offset as f32 / 64.0 + side.texture_offset as f32 / 64.0,
-                    line_len,
-                    back_sector.ceiling_height as f32,
-                    front_sector.ceiling_height as f32,
-                    front_sector.ceiling_height as f32,
-                    front_sector.floor_height as f32,
-                    side.row_offset as f32 / 64.0,
+                    WallUvParams {
+                        texture_name: &side.top_texture,
+                        u_start_world: side.texture_offset as f32 + dist_start,
+                        u_end_world: side.texture_offset as f32 + dist_end,
+                        bottom_z: back_sector.ceiling_height as f32,
+                        top_z: front_sector.ceiling_height as f32,
+                        row_offset_world: side.row_offset as f32,
+                    },
+                    texture_sizes,
                 ),
                 color,
             );
@@ -975,15 +1281,15 @@ fn build_wall_sections_for_seg(
                 front_sector.floor_height as f32,
                 back_sector.floor_height as f32,
                 compute_wall_uvs(
-                    linedef.flags,
-                    WallSectionKind::Lower,
-                    seg.offset as f32 / 64.0 + side.texture_offset as f32 / 64.0,
-                    line_len,
-                    front_sector.floor_height as f32,
-                    back_sector.floor_height as f32,
-                    front_sector.ceiling_height as f32,
-                    front_sector.floor_height as f32,
-                    side.row_offset as f32 / 64.0,
+                    WallUvParams {
+                        texture_name: &side.bottom_texture,
+                        u_start_world: side.texture_offset as f32 + dist_start,
+                        u_end_world: side.texture_offset as f32 + dist_end,
+                        bottom_z: front_sector.floor_height as f32,
+                        top_z: back_sector.floor_height as f32,
+                        row_offset_world: side.row_offset as f32,
+                    },
+                    texture_sizes,
                 ),
                 color,
             );
@@ -999,15 +1305,15 @@ fn build_wall_sections_for_seg(
                 back_sector.floor_height.max(front_sector.floor_height) as f32,
                 back_sector.ceiling_height.min(front_sector.ceiling_height) as f32,
                 compute_wall_uvs(
-                    linedef.flags,
-                    WallSectionKind::MiddleMasked,
-                    seg.offset as f32 / 64.0 + side.texture_offset as f32 / 64.0,
-                    line_len,
-                    back_sector.floor_height.max(front_sector.floor_height) as f32,
-                    back_sector.ceiling_height.min(front_sector.ceiling_height) as f32,
-                    front_sector.ceiling_height as f32,
-                    front_sector.floor_height as f32,
-                    side.row_offset as f32 / 64.0,
+                    WallUvParams {
+                        texture_name: &side.mid_texture,
+                        u_start_world: side.texture_offset as f32 + dist_start,
+                        u_end_world: side.texture_offset as f32 + dist_end,
+                        bottom_z: back_sector.floor_height.max(front_sector.floor_height) as f32,
+                        top_z: back_sector.ceiling_height.min(front_sector.ceiling_height) as f32,
+                        row_offset_world: side.row_offset as f32,
+                    },
+                    texture_sizes,
                 ),
                 color,
             );
@@ -1028,15 +1334,15 @@ fn build_wall_sections_for_seg(
             front_sector.floor_height as f32,
             front_sector.ceiling_height as f32,
             compute_wall_uvs(
-                linedef.flags,
-                WallSectionKind::MiddleSolid,
-                seg.offset as f32 / 64.0 + side.texture_offset as f32 / 64.0,
-                line_len,
-                front_sector.floor_height as f32,
-                front_sector.ceiling_height as f32,
-                front_sector.ceiling_height as f32,
-                front_sector.floor_height as f32,
-                side.row_offset as f32 / 64.0,
+                WallUvParams {
+                    texture_name,
+                    u_start_world: side.texture_offset as f32 + dist_start,
+                    u_end_world: side.texture_offset as f32 + dist_end,
+                    bottom_z: front_sector.floor_height as f32,
+                    top_z: front_sector.ceiling_height as f32,
+                    row_offset_world: side.row_offset as f32,
+                },
+                texture_sizes,
             ),
             color,
         );
@@ -1058,6 +1364,9 @@ fn push_wall(
     if texture_name.is_empty() || texture_name == "-" || top_z <= bottom_z {
         return;
     }
+    // TODO: derive the exact Doom outward side for every linedef side. This stable
+    // perpendicular is sufficient for first-pass side lighting with culling disabled.
+    let normal = wall_normal(start, end);
     walls.push(WallQuad {
         texture_name: texture_name.to_string(),
         section_kind,
@@ -1068,8 +1377,20 @@ fn push_wall(
         top_z,
         uv_min,
         uv_max,
+        normal,
         color,
     });
+}
+
+fn wall_normal(start: DVec2, end: DVec2) -> [f32; 3] {
+    let dir = end - start;
+    let len = dir.length();
+    if len <= f64::EPSILON {
+        return [0.0, 0.0, 1.0];
+    }
+    let nx = (dir.y / len) as f32;
+    let nz = (-dir.x / len) as f32;
+    [nx, 0.0, nz]
 }
 
 fn make_flat_triangle(
@@ -1084,17 +1405,14 @@ fn make_flat_triangle(
         [world[1].x as f32, world[1].y as f32, z],
         [world[2].x as f32, world[2].y as f32, z],
     ];
-    let uvs = [
-        [world[0].x as f32 / 64.0, world[0].y as f32 / 64.0],
-        [world[1].x as f32 / 64.0, world[1].y as f32 / 64.0],
-        [world[2].x as f32 / 64.0, world[2].y as f32 / 64.0],
-    ];
+    let uvs = world.map(flat_world_uv);
 
     if is_ceiling {
         FlatTriangle {
             texture_name: missing_texture_name(texture_name),
             positions: [positions[0], positions[2], positions[1]],
             uvs: [uvs[0], uvs[2], uvs[1]],
+            normal: [0.0, -1.0, 0.0],
             color: flat_color(color, true),
         }
     } else {
@@ -1102,9 +1420,17 @@ fn make_flat_triangle(
             texture_name: missing_texture_name(texture_name),
             positions,
             uvs,
+            normal: [0.0, 1.0, 0.0],
             color: flat_color(color, false),
         }
     }
+}
+
+fn flat_world_uv(world: DVec2) -> [f32; 2] {
+    // UZDoom's classic flat path emits world-space UVs as x/64 and -y/64.
+    // Our map plane is XZ, represented here as DVec2(x, z), so both floors
+    // and ceilings use the same repeated world-space mapping.
+    [world.x as f32 / 64.0, -(world.y as f32) / 64.0]
 }
 
 fn flat_color(color: [f32; 4], is_ceiling: bool) -> [f32; 4] {
@@ -1141,48 +1467,40 @@ fn resolve_flat_texture(
     }
 }
 
-fn compute_wall_uvs(
-    linedef_flags: u16,
-    section_kind: WallSectionKind,
-    offset_u: f32,
-    line_len: f32,
+fn texture_size(texture_name: &str, texture_sizes: &HashMap<String, (f32, f32)>) -> (f32, f32) {
+    texture_sizes
+        .get(texture_name)
+        .copied()
+        .unwrap_or((64.0, 64.0))
+}
+
+struct WallUvParams<'a> {
+    texture_name: &'a str,
+    u_start_world: f32,
+    u_end_world: f32,
     bottom_z: f32,
     top_z: f32,
-    front_ceiling_z: f32,
-    front_floor_z: f32,
-    row_offset: f32,
-) -> ([f32; 2], [f32; 2]) {
-    let dont_pegtop = (linedef_flags & 0x0008) != 0;
-    let dont_pegbottom = (linedef_flags & 0x0010) != 0;
-    let height = top_z - bottom_z;
-    let base_v = match section_kind {
-        WallSectionKind::Upper => {
-            if dont_pegtop {
-                front_ceiling_z / 64.0
-            } else {
-                top_z / 64.0
-            }
-        }
-        WallSectionKind::Lower => {
-            if dont_pegbottom {
-                bottom_z / 64.0
-            } else {
-                front_floor_z / 64.0
-            }
-        }
-        WallSectionKind::MiddleSolid | WallSectionKind::MiddleMasked => {
-            if dont_pegbottom {
-                bottom_z / 64.0
-            } else {
-                top_z / 64.0
-            }
-        }
-    } + row_offset;
+    row_offset_world: f32,
+}
 
-    (
-        [offset_u, base_v],
-        [offset_u + line_len / 64.0, base_v + height / 64.0],
-    )
+fn compute_wall_uvs(
+    params: WallUvParams<'_>,
+    texture_sizes: &HashMap<String, (f32, f32)>,
+) -> ([f32; 2], [f32; 2]) {
+    let (texture_width, texture_height) = texture_size(params.texture_name, texture_sizes);
+    let texture_width = texture_width.max(1.0);
+    let texture_height = texture_height.max(1.0);
+    let u0 = params.u_start_world / texture_width;
+    let u1 = params.u_end_world / texture_width;
+
+    // UZDoom's wall path keeps U continuous across split segs by measuring from
+    // the parent linedef. This pass intentionally keeps stable local wall V and
+    // leaves exact upper/lower/middle pegging rules as a TODO.
+    let height = (params.top_z - params.bottom_z).max(0.0);
+    let v0 = params.row_offset_world / texture_height;
+    let v1 = (params.row_offset_world + height) / texture_height;
+
+    ([u0, v0], [u1, v1])
 }
 
 fn signed_area(a: DVec2, b: DVec2, c: DVec2) -> f64 {
@@ -1196,15 +1514,6 @@ fn is_degenerate_triangle(triangle: [DVec2; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_square_level(malformed: bool) -> Level {
-        let segs = if malformed {
-            vec![(0, 1), (3, 2), (2, 3), (3, 0)]
-        } else {
-            vec![(0, 1), (1, 2), (2, 3), (3, 0)]
-        };
-        test_square_level_with_edges(segs)
-    }
 
     fn test_square_level_with_edges(edges: Vec<(usize, usize)>) -> Level {
         test_level_with_vertices_and_edges(
@@ -1290,92 +1599,219 @@ mod tests {
     }
 
     #[test]
-    fn subsector_polygon_uses_ordered_seg_loop() {
-        let level = test_square_level(false);
-        let subsector = &level.subsectors[0];
+    fn bsp_clipping_generates_polygon_without_nodes() {
+        let level = test_square_level_with_edges(vec![(0, 1)]);
 
-        let polygon = subsector_polygon_from_seg_loop(&level, subsector)
-            .expect("valid square subsector loop");
+        let polygons = build_bsp_subsector_polygons(&level);
 
-        assert_eq!(
-            polygon,
-            vec![
-                level.vertices[0].p,
-                level.vertices[1].p,
-                level.vertices[2].p,
-                level.vertices[3].p,
-            ]
-        );
+        assert_eq!(polygons.polygons.len(), 1);
+        assert!(polygons.polygons[0].is_some());
+        assert_eq!(polygons.degenerate_polygons_skipped, 0);
     }
 
     #[test]
-    fn subsector_polygon_chains_unordered_segs() {
-        let level = test_square_level_with_edges(vec![(0, 1), (2, 3), (1, 2), (3, 0)]);
+    fn bsp_clipping_assigns_leaf_polygons_for_subsectors_with_few_segs() {
+        let mut level = test_square_level_with_edges(vec![(0, 1), (1, 2), (2, 3)]);
+        level.subsectors = vec![
+            level::SubSector {
+                num_segs: 1,
+                first_seg: 0,
+                sector: 0,
+            },
+            level::SubSector {
+                num_segs: 2,
+                first_seg: 1,
+                sector: 0,
+            },
+        ];
+        level.nodes = vec![level::Node {
+            x: 32,
+            y: 0,
+            dx: 0,
+            dy: 64,
+            bbox: [[0, 0, 0, 0]; 2],
+            children: [0x8000, 0x8001],
+        }];
 
-        let polygon = subsector_polygon_from_seg_loop(&level, &level.subsectors[0])
-            .expect("unordered square subsector should chain");
+        let polygons = build_bsp_subsector_polygons(&level);
 
-        assert_eq!(
-            polygon,
-            vec![
-                level.vertices[0].p,
-                level.vertices[1].p,
-                level.vertices[2].p,
-                level.vertices[3].p,
-            ]
-        );
+        assert!(polygons.polygons[0].is_some());
+        assert!(polygons.polygons[1].is_some());
+        assert_eq!(polygons.degenerate_polygons_skipped, 0);
+        assert!(polygon_signed_area(polygons.polygons[0].as_ref().unwrap()).abs() > 1.0);
+        assert!(polygon_signed_area(polygons.polygons[1].as_ref().unwrap()).abs() > 1.0);
     }
 
     #[test]
-    fn subsector_polygon_uses_reversed_seg_when_needed() {
-        let level = test_square_level_with_edges(vec![(0, 1), (2, 3), (2, 1), (3, 0)]);
+    fn bsp_side_clipping_splits_convex_polygon() {
+        let node = level::Node {
+            x: 32,
+            y: 0,
+            dx: 0,
+            dy: 64,
+            bbox: [[0, 0, 0, 0]; 2],
+            children: [0x8000, 0x8001],
+        };
+        let polygon = vec![
+            DVec2::new(0.0, 0.0),
+            DVec2::new(64.0, 0.0),
+            DVec2::new(64.0, 64.0),
+            DVec2::new(0.0, 64.0),
+        ];
 
-        let loop_ =
-            reconstruct_subsector_polygon(&level, 0).expect("reversed square edge should chain");
+        let front = clip_polygon_to_bsp_side(&polygon, &node, 0);
+        let back = clip_polygon_to_bsp_side(&polygon, &node, 1);
 
-        assert_eq!(loop_.reversed_segs, 1);
-        assert_eq!(
-            loop_.vertices,
-            vec![
-                level.vertices[0].p,
-                level.vertices[1].p,
-                level.vertices[2].p,
-                level.vertices[3].p,
-            ]
-        );
+        assert_eq!(front.len(), 4);
+        assert_eq!(back.len(), 4);
+        assert!(front.iter().all(|p| p.x >= 32.0 - SUBSECTOR_VERTEX_EPSILON));
+        assert!(back.iter().all(|p| p.x <= 32.0 + SUBSECTOR_VERTEX_EPSILON));
     }
 
     #[test]
-    fn subsector_polygon_chains_nearly_equal_vertices() {
-        let level = test_level_with_vertices_and_edges(
+    fn flat_uvs_use_world_space_tiling_without_normalization() {
+        let uv = flat_world_uv(DVec2::new(128.0, 192.0));
+
+        assert_eq!(uv, [2.0, -3.0]);
+    }
+
+    #[test]
+    fn wall_uvs_use_wall_distance_and_texture_dimensions() {
+        let mut texture_sizes = HashMap::new();
+        texture_sizes.insert("WALL".to_string(), (32.0, 16.0));
+
+        let (uv_min, uv_max) = compute_wall_uvs(
+            WallUvParams {
+                texture_name: "WALL",
+                u_start_world: 16.0,
+                u_end_world: 112.0,
+                bottom_z: 8.0,
+                top_z: 72.0,
+                row_offset_world: 4.0,
+            },
+            &texture_sizes,
+        );
+
+        assert_eq!(uv_min, [0.5, 0.25]);
+        assert_eq!(uv_max, [3.5, 4.25]);
+    }
+
+    #[test]
+    fn wall_uvs_use_simplified_texture_top_for_all_wall_parts() {
+        let mut texture_sizes = HashMap::new();
+        texture_sizes.insert("WALL".to_string(), (64.0, 64.0));
+
+        let (uv_min, uv_max) = compute_wall_uvs(
+            WallUvParams {
+                texture_name: "WALL",
+                u_start_world: 0.0,
+                u_end_world: 64.0,
+                bottom_z: 0.0,
+                top_z: 128.0,
+                row_offset_world: 16.0,
+            },
+            &texture_sizes,
+        );
+
+        assert_eq!(uv_min, [0.0, 0.25]);
+        assert_eq!(uv_max, [1.0, 2.25]);
+    }
+
+    #[test]
+    fn wall_sections_use_linedef_relative_u_coordinates() {
+        let mut level = test_level_with_vertices_and_edges(
             vec![
                 DVec2::new(0.0, 0.0),
-                DVec2::new(64.0, 0.0),
-                DVec2::new(64.005, 0.004),
-                DVec2::new(64.0, 64.0),
-                DVec2::new(0.0, 64.0),
+                DVec2::new(128.0, 0.0),
+                DVec2::new(32.0, 0.0),
+                DVec2::new(96.0, 0.0),
             ],
-            vec![(0, 1), (2, 3), (3, 4), (4, 0)],
+            vec![(2, 3)],
+        );
+        level.sidedefs.push(level::SideDef {
+            texture_offset: 8.0,
+            row_offset: 0.0,
+            top_texture: "-".to_string(),
+            bottom_texture: "-".to_string(),
+            mid_texture: "WALL".to_string(),
+            sector: 0,
+        });
+        level.linedefs.push(level::LineDef {
+            v1: 0,
+            v2: 1,
+            flags: 0,
+            special: 0,
+            tag: 0,
+            sidedef: [Some(0), None],
+            sectors: [Some(0), None],
+        });
+        level.segs[0].linedef = Some(0);
+        level.sidedefs[0].mid_texture = "WALL".to_string();
+
+        let mut texture_sizes = HashMap::new();
+        texture_sizes.insert("WALL".to_string(), (32.0, 64.0));
+        let mut walls = Vec::new();
+        build_wall_sections_for_seg(
+            &level,
+            &level.linedefs[0],
+            &level.segs[0],
+            level.vertices[2].p,
+            level.vertices[3].p,
+            &texture_sizes,
+            &mut walls,
         );
 
-        let polygon = subsector_polygon_from_seg_loop(&level, &level.subsectors[0])
-            .expect("epsilon-matched subsector should chain");
-
-        assert_eq!(
-            polygon,
-            vec![
-                level.vertices[0].p,
-                level.vertices[1].p,
-                level.vertices[3].p,
-                level.vertices[4].p,
-            ]
-        );
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].uv_min[0], 1.25);
+        assert_eq!(walls[0].uv_max[0], 3.25);
     }
 
     #[test]
-    fn malformed_subsector_loop_is_rejected() {
-        let level = test_square_level(true);
-        assert!(subsector_polygon_from_seg_loop(&level, &level.subsectors[0]).is_none());
+    fn reversed_wall_sections_keep_projected_u_direction() {
+        let mut level = test_level_with_vertices_and_edges(
+            vec![
+                DVec2::new(0.0, 0.0),
+                DVec2::new(128.0, 0.0),
+                DVec2::new(96.0, 0.0),
+                DVec2::new(32.0, 0.0),
+            ],
+            vec![(2, 3)],
+        );
+        level.sidedefs.push(level::SideDef {
+            texture_offset: 8.0,
+            row_offset: 0.0,
+            top_texture: "-".to_string(),
+            bottom_texture: "-".to_string(),
+            mid_texture: "WALL".to_string(),
+            sector: 0,
+        });
+        level.linedefs.push(level::LineDef {
+            v1: 0,
+            v2: 1,
+            flags: 0,
+            special: 0,
+            tag: 0,
+            sidedef: [Some(0), None],
+            sectors: [Some(0), None],
+        });
+        level.segs[0].linedef = Some(0);
+
+        let mut texture_sizes = HashMap::new();
+        texture_sizes.insert("WALL".to_string(), (32.0, 64.0));
+        let mut walls = Vec::new();
+        build_wall_sections_for_seg(
+            &level,
+            &level.linedefs[0],
+            &level.segs[0],
+            level.vertices[2].p,
+            level.vertices[3].p,
+            &texture_sizes,
+            &mut walls,
+        );
+
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].uv_min[0], 3.25);
+        assert_eq!(walls[0].uv_max[0], 1.25);
     }
 
     #[test]
@@ -1406,6 +1842,17 @@ mod tests {
             .collect();
         available_flats.insert("__missing".to_string());
         available_flats.insert(SKY_FALLBACK_TEXTURE.to_string());
+        let texture_sizes: HashMap<String, (f32, f32)> = available_flats
+            .iter()
+            .map(|name| {
+                let size = if name == "__missing" {
+                    (16.0, 16.0)
+                } else {
+                    (64.0, 64.0)
+                };
+                (name.clone(), size)
+            })
+            .collect();
 
         let (_, stats) = build_render_scene_with_stats(
             &level,
@@ -1415,6 +1862,8 @@ mod tests {
             &[],
             &HashSet::new(),
             &available_flats,
+            &texture_sizes,
+            RenderDebugMode::Lit,
         );
 
         assert!(stats.floor_triangles > 0);

@@ -1,0 +1,1 @@
+/home/panos/Workspace/doom/rust-gzdoom/target/release/librender_vulkan.rlib: /home/panos/Workspace/doom/rust-gzdoom/render-api/src/lib.rs /home/panos/Workspace/doom/rust-gzdoom/render-vulkan/shaders/tex.frag.spv /home/panos/Workspace/doom/rust-gzdoom/render-vulkan/shaders/tex.vert.spv /home/panos/Workspace/doom/rust-gzdoom/render-vulkan/src/lib.rs

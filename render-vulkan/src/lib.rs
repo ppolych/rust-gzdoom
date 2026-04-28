@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Result};
 use ash::vk;
 use glam::DVec2;
-use naga::ShaderStage;
 use raw_window_handle::{
     HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
-use render_api::Renderer;
+use render_api::{Renderer, MAX_POINT_LIGHTS};
 use std::ffi::CStr;
 use winit::window::Window;
 
@@ -15,6 +14,16 @@ pub struct RenderVertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    pub world_pos: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct LightUniform {
+    config: [f32; 4],
+    light_position_radius: [[f32; 4]; MAX_POINT_LIGHTS],
+    light_color_intensity: [[f32; 4]; MAX_POINT_LIGHTS],
 }
 
 pub struct VulkanRenderer {
@@ -51,6 +60,8 @@ pub struct VulkanRenderer {
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
     vertex_buffer_capacity: usize,
+    light_uniform_buffer: vk::Buffer,
+    light_uniform_buffer_memory: vk::DeviceMemory,
     vertex_count: usize,
     draw_calls: Vec<DrawCall>,
     textures: std::collections::HashMap<String, VulkanTexture>,
@@ -74,6 +85,10 @@ struct VulkanTexture {
     has_alpha: bool,
 }
 
+fn render_world_pos(p: [f32; 3]) -> [f32; 3] {
+    [p[0], p[2], p[1]]
+}
+
 impl VulkanRenderer {
     const TEX_VERT_SPV: &'static [u8] = include_bytes!("../shaders/tex.vert.spv");
     const TEX_FRAG_SPV: &'static [u8] = include_bytes!("../shaders/tex.frag.spv");
@@ -81,39 +96,77 @@ impl VulkanRenderer {
     const TRACE_RENDERER: bool = false;
     const DEBUG_GRAY_CLEAR: bool = false;
 
+    #[allow(dead_code)]
     fn debug_vertex_shader_glsl() -> &'static str {
         r#"#version 450
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec2 in_uv;
 layout(location = 2) in vec4 in_color;
-
-layout(binding = 0) uniform CameraUniform {
-    mat4 view_proj;
-} camera;
+layout(location = 3) in vec3 in_world_pos;
+layout(location = 4) in vec3 in_normal;
 
 layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
+layout(location = 2) out vec3 out_world_pos;
+layout(location = 3) out vec3 out_normal;
 
 void main() {
-    gl_Position = camera.view_proj * vec4(in_pos, 1.0);
+    gl_Position = vec4(in_pos, 1.0);
     out_uv = in_uv;
     out_color = in_color;
+    out_world_pos = in_world_pos;
+    out_normal = in_normal;
 }
 "#
     }
 
-    fn debug_fragment_shader_glsl() -> &'static str {
+    #[allow(dead_code)]
+    fn textured_fragment_shader_glsl() -> &'static str {
         r#"#version 450
 layout(location = 0) in vec2 in_uv;
 layout(location = 1) in vec4 in_color;
+layout(location = 2) in vec3 in_world_pos;
+layout(location = 3) in vec3 in_normal;
 
-layout(binding = 1) uniform sampler2D tex;
+layout(binding = 0) uniform sampler2D tex;
+
+#define MAX_LIGHTS 16
+
+layout(binding = 1) uniform LightUniform {
+    vec4 config; // x=light_count, y=ambient, z=dynamic_enabled
+    vec4 light_position_radius[MAX_LIGHTS];
+    vec4 light_color_intensity[MAX_LIGHTS];
+} lights;
 
 layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 tex_color = texture(tex, in_uv);
-    out_color = tex_color * in_color;
+    if (tex_color.a < 0.1) discard;
+
+    vec3 lighting = vec3(1.0);
+    if (lights.config.z > 0.5) {
+        vec3 normal = normalize(in_normal);
+        lighting = vec3(max(lights.config.y, 0.0));
+        int light_count = min(int(lights.config.x + 0.5), MAX_LIGHTS);
+        for (int i = 0; i < light_count; i++) {
+            vec3 light_pos = lights.light_position_radius[i].xyz;
+            float radius = max(lights.light_position_radius[i].w, 0.001);
+            vec3 to_light = light_pos - in_world_pos;
+            float dist = length(to_light);
+            if (dist < radius) {
+                vec3 light_dir = to_light / max(dist, 0.001);
+                float ndotl = max(dot(normal, light_dir), 0.0);
+                float attenuation = max(1.0 - (dist / radius), 0.0);
+                vec3 light_color = lights.light_color_intensity[i].rgb;
+                float intensity = lights.light_color_intensity[i].a;
+                lighting += light_color * intensity * attenuation * ndotl;
+            }
+        }
+    }
+
+    vec4 lit = vec4(clamp(tex_color.rgb * in_color.rgb * lighting, 0.0, 1.0), tex_color.a * in_color.a);
+    out_color = lit;
     if (out_color.a < 0.1) discard;
 }
 "#
@@ -128,16 +181,22 @@ void main() {
                 pos: [-0.6, -0.4, 0.0],
                 uv: [0.0, 1.0],
                 color: [1.0, 0.0, 0.0, 1.0],
+                world_pos: [-0.6, 0.0, -0.4],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [0.0, 0.6, 0.0],
                 uv: [0.5, 0.0],
                 color: [0.0, 1.0, 0.0, 1.0],
+                world_pos: [0.0, 0.0, 0.6],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [0.6, -0.4, 0.0],
                 uv: [1.0, 1.0],
                 color: [0.0, 0.0, 1.0, 1.0],
+                world_pos: [0.6, 0.0, -0.4],
+                normal: [0.0, 1.0, 0.0],
             },
         ];
         vertices.extend_from_slice(&triangle);
@@ -154,31 +213,43 @@ void main() {
                 pos: [-0.9, -0.9, 0.0],
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.9, 0.0, -0.9],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [-0.9, -0.2, 0.0],
                 uv: [0.0, 0.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.9, 0.0, -0.2],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [-0.2, -0.2, 0.0],
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.2, 0.0, -0.2],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [-0.9, -0.9, 0.0],
                 uv: [0.0, 1.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.9, 0.0, -0.9],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [-0.2, -0.2, 0.0],
                 uv: [1.0, 0.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.2, 0.0, -0.2],
+                normal: [0.0, 1.0, 0.0],
             },
             RenderVertex {
                 pos: [-0.2, -0.9, 0.0],
                 uv: [1.0, 1.0],
                 color: [1.0, 1.0, 1.0, 1.0],
+                world_pos: [-0.2, 0.0, -0.9],
+                normal: [0.0, 1.0, 0.0],
             },
         ];
         vertices.extend_from_slice(&quad);
@@ -283,6 +354,14 @@ void main() {
             vk::BufferUsageFlags::VERTEX_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
+        let (light_uniform_buffer, light_uniform_buffer_memory) = Self::create_buffer(
+            &instance,
+            physical_device,
+            &device,
+            std::mem::size_of::<LightUniform>() as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
 
         let command_pool = Self::create_command_pool(&device, queue_family_index)?;
         let command_buffers =
@@ -324,6 +403,8 @@ void main() {
             vertex_buffer,
             vertex_buffer_memory,
             vertex_buffer_capacity,
+            light_uniform_buffer,
+            light_uniform_buffer_memory,
             vertex_count: 0,
             draw_calls: Vec::new(),
             textures: std::collections::HashMap::new(),
@@ -385,41 +466,30 @@ void main() {
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> Result<(vk::PipelineLayout, vk::Pipeline, vk::Pipeline)> {
-        debug_assert_eq!(std::mem::size_of::<RenderVertex>(), 36);
+        debug_assert_eq!(std::mem::size_of::<RenderVertex>(), 60);
         debug_assert_eq!(std::mem::offset_of!(RenderVertex, pos), 0);
         debug_assert_eq!(std::mem::offset_of!(RenderVertex, uv), 12);
         debug_assert_eq!(std::mem::offset_of!(RenderVertex, color), 20);
+        debug_assert_eq!(std::mem::offset_of!(RenderVertex, world_pos), 36);
+        debug_assert_eq!(std::mem::offset_of!(RenderVertex, normal), 48);
         if Self::TRACE_RENDERER {
             eprintln!(
-                "RenderVertex layout: size={} pos={} uv={} color={} stride={}",
+                "RenderVertex layout: size={} pos={} uv={} color={} world_pos={} normal={} stride={}",
                 std::mem::size_of::<RenderVertex>(),
                 std::mem::offset_of!(RenderVertex, pos),
                 std::mem::offset_of!(RenderVertex, uv),
                 std::mem::offset_of!(RenderVertex, color),
+                std::mem::offset_of!(RenderVertex, world_pos),
+                std::mem::offset_of!(RenderVertex, normal),
                 std::mem::size_of::<RenderVertex>(),
             );
-            eprintln!("Vertex attrs: loc0=R32G32B32@0 loc1=R32G32@12 loc2=R32G32B32A32@20");
+            eprintln!("Vertex attrs: loc0=R32G32B32@0 loc1=R32G32@12 loc2=R32G32B32A32@20 loc3=R32G32B32@36 loc4=R32G32B32@48");
         }
 
-        let (vert_module, frag_module) = if Self::FORCE_DEBUG_TRIANGLE {
-            (
-                Self::create_shader_module_from_glsl(
-                    device,
-                    Self::debug_vertex_shader_glsl(),
-                    ShaderStage::Vertex,
-                )?,
-                Self::create_shader_module_from_glsl(
-                    device,
-                    Self::debug_fragment_shader_glsl(),
-                    ShaderStage::Fragment,
-                )?,
-            )
-        } else {
-            (
-                Self::create_shader_module_from_spirv_bytes(device, Self::TEX_VERT_SPV)?,
-                Self::create_shader_module_from_spirv_bytes(device, Self::TEX_FRAG_SPV)?,
-            )
-        };
+        let (vert_module, frag_module) = (
+            Self::create_shader_module_from_spirv_bytes(device, Self::TEX_VERT_SPV)?,
+            Self::create_shader_module_from_spirv_bytes(device, Self::TEX_FRAG_SPV)?,
+        );
 
         let entry_point = CStr::from_bytes_with_nul(b"main\0")?;
         let shader_stages = [
@@ -459,6 +529,18 @@ void main() {
                     location: 2,
                     format: vk::Format::R32G32B32A32_SFLOAT,
                     offset: 20,
+                },
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 3,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: 36,
+                },
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 4,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: 48,
                 },
             ]);
 
@@ -579,31 +661,6 @@ void main() {
         let code = bytes;
         let create_info = vk::ShaderModuleCreateInfo::builder().code(code);
         unsafe { Ok(device.create_shader_module(&create_info, None)?) }
-    }
-
-    fn create_shader_module_from_glsl(
-        device: &ash::Device,
-        source: &str,
-        stage: ShaderStage,
-    ) -> Result<vk::ShaderModule> {
-        let mut frontend = naga::front::glsl::Frontend::default();
-        let module = frontend
-            .parse(&naga::front::glsl::Options::from(stage), source)
-            .map_err(|errs| anyhow!("GLSL parse failed: {:?}", errs))?;
-        let info = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .map_err(|e| anyhow!("GLSL validation failed: {:?}", e))?;
-        let pipeline_options = naga::back::spv::PipelineOptions {
-            shader_stage: stage,
-            entry_point: "main".to_string(),
-        };
-        let options = naga::back::spv::Options::default();
-        let words = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
-            .map_err(|e| anyhow!("SPIR-V generation failed: {:?}", e))?;
-        Self::create_shader_module(device, &words)
     }
 
     fn create_shader_module_from_spirv_bytes(
@@ -988,18 +1045,29 @@ void main() {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let light_layout_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
 
-        let bindings = [sampler_layout_binding.build()];
+        let bindings = [sampler_layout_binding.build(), light_layout_binding.build()];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
 
         unsafe { Ok(device.create_descriptor_set_layout(&layout_info, None)?) }
     }
 
     fn create_descriptor_pool(device: &ash::Device) -> Result<vk::DescriptorPool> {
-        let pool_sizes = [vk::DescriptorPoolSize::builder()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(4096)
-            .build()];
+        let pool_sizes = [
+            vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(4096)
+                .build(),
+            vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(4096)
+                .build(),
+        ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&pool_sizes)
@@ -1355,6 +1423,50 @@ void main() {
         unsafe { Ok(self.device.create_image_view(&view_info, None)?) }
     }
 
+    fn update_light_uniform(&self, scene: &render_api::RenderScene) -> Result<()> {
+        let mut uniform = LightUniform {
+            config: [
+                scene.point_lights.len().min(MAX_POINT_LIGHTS) as f32,
+                scene.ambient_strength.max(0.0),
+                if scene.dynamic_lighting_enabled {
+                    1.0
+                } else {
+                    0.0
+                },
+                scene.debug_mode.shader_value(),
+            ],
+            light_position_radius: [[0.0; 4]; MAX_POINT_LIGHTS],
+            light_color_intensity: [[0.0; 4]; MAX_POINT_LIGHTS],
+        };
+
+        for (i, light) in scene.point_lights.iter().take(MAX_POINT_LIGHTS).enumerate() {
+            uniform.light_position_radius[i] = [
+                light.position[0],
+                light.position[1],
+                light.position[2],
+                light.radius,
+            ];
+            uniform.light_color_intensity[i] = [
+                light.color[0],
+                light.color[1],
+                light.color[2],
+                light.intensity,
+            ];
+        }
+
+        unsafe {
+            let data_ptr = self.device.map_memory(
+                self.light_uniform_buffer_memory,
+                0,
+                std::mem::size_of::<LightUniform>() as vk::DeviceSize,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(&uniform, data_ptr as *mut LightUniform, 1);
+            self.device.unmap_memory(self.light_uniform_buffer_memory);
+        }
+        Ok(())
+    }
+
     fn create_descriptor_set(&self, view: vk::ImageView) -> Result<vk::DescriptorSet> {
         let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.descriptor_pool)
@@ -1366,14 +1478,27 @@ void main() {
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image_view(view)
             .sampler(self.sampler);
+        let light_buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(self.light_uniform_buffer)
+            .offset(0)
+            .range(std::mem::size_of::<LightUniform>() as vk::DeviceSize);
 
-        let writes = [vk::WriteDescriptorSet::builder()
-            .dst_set(descriptor_set)
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(std::slice::from_ref(&image_info))
-            .build()];
+        let writes = [
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(std::slice::from_ref(&image_info))
+                .build(),
+            vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&light_buffer_info))
+                .build(),
+        ];
 
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
 
@@ -1459,6 +1584,7 @@ impl Renderer for VulkanRenderer {
         scene: &render_api::RenderScene,
         view: &render_api::ViewState,
     ) -> Result<()> {
+        self.update_light_uniform(scene)?;
         let mut opaque_batches: Vec<(String, Vec<RenderVertex>)> = Vec::new();
         let mut alpha_batches: Vec<(f32, String, Vec<RenderVertex>)> = Vec::new();
         let near_plane = 0.1f32;
@@ -1476,6 +1602,8 @@ impl Renderer for VulkanRenderer {
             p: [f32; 3],
             uv: [f32; 2],
             color: [f32; 4],
+            world_pos: [f32; 3],
+            normal: [f32; 3],
         }
 
         let cam_y_for = |p: [f32; 3]| -> f32 {
@@ -1498,6 +1626,16 @@ impl Renderer for VulkanRenderer {
                     lerp(a.color[1], b.color[1]),
                     lerp(a.color[2], b.color[2]),
                     lerp(a.color[3], b.color[3]),
+                ],
+                world_pos: [
+                    lerp(a.world_pos[0], b.world_pos[0]),
+                    lerp(a.world_pos[1], b.world_pos[1]),
+                    lerp(a.world_pos[2], b.world_pos[2]),
+                ],
+                normal: [
+                    lerp(a.normal[0], b.normal[0]),
+                    lerp(a.normal[1], b.normal[1]),
+                    lerp(a.normal[2], b.normal[2]),
                 ],
             }
         };
@@ -1568,6 +1706,8 @@ impl Renderer for VulkanRenderer {
                             pos,
                             uv: vertex.uv,
                             color: vertex.color,
+                            world_pos: vertex.world_pos,
+                            normal: vertex.normal,
                         });
                     }
                 }
@@ -1580,16 +1720,22 @@ impl Renderer for VulkanRenderer {
                     p: flat.positions[0],
                     uv: flat.uvs[0],
                     color: flat.color,
+                    world_pos: render_world_pos(flat.positions[0]),
+                    normal: flat.normal,
                 },
                 ProjectVertex {
                     p: flat.positions[1],
                     uv: flat.uvs[1],
                     color: flat.color,
+                    world_pos: render_world_pos(flat.positions[1]),
+                    normal: flat.normal,
                 },
                 ProjectVertex {
                     p: flat.positions[2],
                     uv: flat.uvs[2],
                     color: flat.color,
+                    world_pos: render_world_pos(flat.positions[2]),
+                    normal: flat.normal,
                 },
             ];
             let mut tri_vertices = Vec::new();
@@ -1605,21 +1751,29 @@ impl Renderer for VulkanRenderer {
                     p: [wall.start.x as f32, wall.start.y as f32, wall.top_z],
                     uv: [wall.uv_min[0], wall.uv_min[1]],
                     color: wall.color,
+                    world_pos: [wall.start.x as f32, wall.top_z, wall.start.y as f32],
+                    normal: wall.normal,
                 },
                 ProjectVertex {
                     p: [wall.start.x as f32, wall.start.y as f32, wall.bottom_z],
                     uv: [wall.uv_min[0], wall.uv_max[1]],
                     color: wall.color,
+                    world_pos: [wall.start.x as f32, wall.bottom_z, wall.start.y as f32],
+                    normal: wall.normal,
                 },
                 ProjectVertex {
                     p: [wall.end.x as f32, wall.end.y as f32, wall.bottom_z],
                     uv: [wall.uv_max[0], wall.uv_max[1]],
                     color: wall.color,
+                    world_pos: [wall.end.x as f32, wall.bottom_z, wall.end.y as f32],
+                    normal: wall.normal,
                 },
                 ProjectVertex {
                     p: [wall.end.x as f32, wall.end.y as f32, wall.top_z],
                     uv: [wall.uv_max[0], wall.uv_min[1]],
                     color: wall.color,
+                    world_pos: [wall.end.x as f32, wall.top_z, wall.end.y as f32],
+                    normal: wall.normal,
                 },
             ];
             let mut quad_vertices = Vec::new();
@@ -1649,16 +1803,26 @@ impl Renderer for VulkanRenderer {
                     ],
                     uv: [0.0, 0.0],
                     color: sprite.color,
+                    world_pos: [
+                        p_start.x as f32,
+                        sprite.bottom_z + sprite.height,
+                        p_start.y as f32,
+                    ],
+                    normal: [0.0, 0.0, 1.0],
                 },
                 ProjectVertex {
                     p: [p_start.x as f32, p_start.y as f32, sprite.bottom_z],
                     uv: [0.0, 1.0],
                     color: sprite.color,
+                    world_pos: [p_start.x as f32, sprite.bottom_z, p_start.y as f32],
+                    normal: [0.0, 0.0, 1.0],
                 },
                 ProjectVertex {
                     p: [p_end.x as f32, p_end.y as f32, sprite.bottom_z],
                     uv: [1.0, 1.0],
                     color: sprite.color,
+                    world_pos: [p_end.x as f32, sprite.bottom_z, p_end.y as f32],
+                    normal: [0.0, 0.0, 1.0],
                 },
                 ProjectVertex {
                     p: [
@@ -1668,6 +1832,12 @@ impl Renderer for VulkanRenderer {
                     ],
                     uv: [1.0, 0.0],
                     color: sprite.color,
+                    world_pos: [
+                        p_end.x as f32,
+                        sprite.bottom_z + sprite.height,
+                        p_end.y as f32,
+                    ],
+                    normal: [0.0, 0.0, 1.0],
                 },
             ];
             let mut sprite_vertices = Vec::new();
@@ -1992,6 +2162,9 @@ impl Drop for VulkanRenderer {
             }
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_memory, None);
+            self.device.destroy_buffer(self.light_uniform_buffer, None);
+            self.device
+                .free_memory(self.light_uniform_buffer_memory, None);
             self.device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
             self.device.destroy_image_view(self.depth_image_view, None);

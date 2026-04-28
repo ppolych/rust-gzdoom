@@ -1,0 +1,12 @@
+/home/panos/Workspace/doom/rust-gzdoom/target/release/deps/spin-247b8f98244d9004.d: /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lib.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lazy.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex/spin.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/once.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/relax.rs
+
+/home/panos/Workspace/doom/rust-gzdoom/target/release/deps/libspin-247b8f98244d9004.rlib: /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lib.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lazy.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex/spin.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/once.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/relax.rs
+
+/home/panos/Workspace/doom/rust-gzdoom/target/release/deps/libspin-247b8f98244d9004.rmeta: /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lib.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lazy.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex/spin.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/once.rs /home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/relax.rs
+
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lib.rs:
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/lazy.rs:
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex.rs:
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/mutex/spin.rs:
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/once.rs:
+/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/spin-0.10.0/src/relax.rs:
