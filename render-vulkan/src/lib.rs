@@ -432,10 +432,9 @@ void main() {
             .engine_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_3);
 
-        let extension_names = [
-            ash::extensions::khr::Surface::name().as_ptr(),
-            ash::extensions::khr::WaylandSurface::name().as_ptr(),
-        ];
+    let extension_names = [
+        ash::extensions::khr::Surface::name().as_ptr(),
+    ];
 
         let create_info = vk::InstanceCreateInfo::builder()
             .application_info(&app_info)
